@@ -1,15 +1,17 @@
-use std::io::Write;
+use std::{ffi::OsString, io::Write, process::Command};
 
-fn code_for_dbus_xml(xml: impl AsRef<std::path::Path>) -> String {
-    dbus_codegen::generate(
-        &std::fs::read_to_string(xml).unwrap(),
-        &dbus_codegen::GenOpts {
-            methodtype: None,
-            connectiontype: dbus_codegen::ConnectionType::Blocking,
-            ..Default::default()
-        },
-    )
-    .unwrap()
+fn code_for_dbus_xml(xml: impl Into<OsString>) -> String {
+    let output = Command::new("zbus-xmlgen")
+        .arg("file")
+        .arg(xml.into())
+        .arg("-o")
+        .arg("-")
+        .output()
+        .expect("Failed generating code from xml");
+    let source =
+        String::from_utf8(output.stdout).expect("generated XML contained illegal codepoints");
+    //remove doc comments
+    source.replace("//!", "///")
 }
 
 fn main() {

@@ -1,17 +1,16 @@
-use std::{ops::IndexMut, path::PathBuf, time::Duration};
-
-use clap::{command, Arg, Args, Parser, Subcommand};
-use dbus::{
-    blocking::{stdintf::org_freedesktop_dbus::ObjectManager, LocalConnection, Proxy},
-    Message, Path,
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
 };
+
+use clap::{Args, Parser, Subcommand};
 use glob::glob;
-use nix::libc::ELIBEXEC;
-
-use crate::{
-    machine_manager::OrgFreedesktopMachine1Manager, systemd_manager::OrgFreedesktopSystemd1Manager,
-    unit::OrgFreedesktopSystemd1Unit,
+use zbus::{
+    blocking::{Connection, Proxy},
+    zvariant::OwnedObjectPath,
 };
+
+use crate::{systemd_manager::ManagerProxyBlocking, unit::UnitProxyBlocking};
 
 mod systemd_manager {
     include!(concat!(env!("OUT_DIR"), "/systemd_manager.rs"));
@@ -129,11 +128,14 @@ struct Cli {
     command: Commands,
 }
 
-fn main() {
+fn main() -> zbus::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::List => list(),
+        Commands::List => {
+            list();
+            Ok(())
+        }
         Commands::Create {
             container_name,
             nixos_path,
@@ -149,10 +151,16 @@ fn main() {
             use_host_network,
         } => todo!(),
         Commands::Destroy { container_name } => todo!(),
-        Commands::Restart { container_name } => restart(&container_name),
+        Commands::Restart { container_name } => {
+            restart(&container_name);
+            Ok(())
+        }
         Commands::Start { container_name } => start(&container_name),
         Commands::Stop { container_name } => stop(&container_name),
-        Commands::Terminate { container_name } => terminate(&container_name),
+        Commands::Terminate { container_name } => {
+            terminate(&container_name);
+            Ok(())
+        }
         Commands::Status { container_name } => status(&container_name),
         Commands::Update {
             container_name,
@@ -176,9 +184,9 @@ fn main() {
 fn list() {
     let config_files = glob(&format!("{CONFIG_DIR}/*.conf")).expect("Faild to read config dir");
     let config_files = config_files.filter_map(Result::ok).filter(|it| {
-        it == "/etc/containers/libpod.conf"
-            || it == "/etc/containers/containers.conf"
-            || it == "/etc/containers/registries.conf"
+        it != "/etc/containers/libpod.conf"
+            && it != "/etc/containers/containers.conf"
+            && it != "/etc/containers/registries.conf"
     });
     for f in config_files {
         if let Some(f) = f.file_prefix() {
@@ -187,75 +195,80 @@ fn list() {
     }
 }
 
-fn systemd_connect(conn: &LocalConnection) -> Proxy<'static, &LocalConnection> {
-    let systemd = Proxy::new(
-        "org.freedesktop.systemd1",
-        "/org/freedesktop/systemd1",
-        BUS_TIMEOUT,
-        conn,
-    );
-    systemd
-        .subscribe()
-        .expect("Failed to subscribe to systemd dbus messages");
-    systemd
+fn systemd_proxy(conn: &Connection) -> zbus::Result<ManagerProxyBlocking<'_>> {
+    ManagerProxyBlocking::builder(conn)
+        .destination("org.freedesktop.systemd1")?
+        .path("/org/freedesktop/systemd1")?
+        .build()
 }
 
-fn get_container_path(container_name: &str, conn: &LocalConnection) -> Path<'static> {
-    let systemd = systemd_connect(&conn);
-    systemd
-        .get_unit(&format!("container@{container_name}.service"))
-        .expect("failed to get unit")
+fn get_container_path(container_name: &str, conn: &Connection) -> zbus::Result<OwnedObjectPath> {
+    let systemd = systemd_proxy(conn)?;
+    systemd.get_unit(&format!("container@{container_name}.service"))
 }
 
-fn status(container_name: &str) {
-    let conn = LocalConnection::new_system().expect("Failed to connect to dbus");
-    let unit = conn.with_proxy(
-        "org.freedesktop.systemd1",
-        get_container_path(container_name, &conn),
-        BUS_TIMEOUT,
-    );
+fn status(container_name: &str) -> zbus::Result<()> {
+    let conn = Connection::system().expect("Failed to connect to dbus");
+    let unit = UnitProxyBlocking::builder(&conn)
+        .destination("org.freedesktop.systemd1")
+        .unwrap()
+        .path(get_container_path(container_name, &conn)?)
+        .unwrap()
+        .build()
+        .unwrap();
     if unit.active_state().expect("Failed to query to unit") == "active" {
         println!("up");
     } else {
         println!("down");
     }
+    Ok(())
 }
 
 // TODO: show "no such container" message if the unit isn't known
 
-fn start(container_name: &str) {
-    let conn = LocalConnection::new_system().expect("Failed to connect to dbus");
+fn start(container_name: &str) -> zbus::Result<()> {
+    let conn = Connection::system().expect("Failed to connect to dbus");
 
-    let systemd = systemd_connect(&conn);
+    let systemd = systemd_proxy(&conn)?;
 
     match systemd.start_unit(&format!("container@{container_name}.service"), "fail") {
         Ok(res) => {
             dbg!(&res);
-            let unit = conn.with_proxy("org.freedesktop.systemd1", res, BUS_TIMEOUT);
+            let unit = UnitProxyBlocking::builder(&conn)
+                .path(res)
+                .unwrap()
+                .build()
+                .unwrap();
             // TODO: check job state
-            // dbg!(unit.active_state().unwrap());
+            dbg!(unit.active_state().unwrap());
         }
         Err(e) => {
             eprintln!("Failed to start container unit {container_name}. Try running as root as interactive auth isn't implemented yet");
         }
     }
+    Ok(())
 }
 
-fn stop(container_name: &str) {
-    let conn = LocalConnection::new_system().expect("Failed to connect to dbus");
+fn stop(container_name: &str) -> zbus::Result<()> {
+    let conn = Connection::system().expect("Failed to connect to dbus");
 
-    let systemd = systemd_connect(&conn);
+    let systemd = systemd_proxy(&conn)?;
 
     match systemd.stop_unit(&format!("container@{container_name}.service"), "fail") {
         Ok(res) => {
             dbg!(&res);
-            let unit = conn.with_proxy("org.freedesktop.systemd1", res, BUS_TIMEOUT);
-            // dbg!(unit.active_state().unwrap());
+            let unit = UnitProxyBlocking::builder(&conn)
+                .path(res)
+                .unwrap()
+                .build()
+                .unwrap();
+            dbg!(unit.active_state().unwrap());
         }
         Err(e) => {
             eprintln!("Failed to stop container unit {container_name}. Try running as root as interactive auth isn't implemented yet");
         }
     }
+    Ok(())
 }
 
 fn restart(container_name: &str) {
@@ -265,13 +278,9 @@ fn restart(container_name: &str) {
 
 // does an unclean immediate shutdown instead of a stop
 fn terminate(container_name: &str) {
-    let conn = LocalConnection::new_system().expect("Failed to connect to dbus");
-    let machined = Proxy::new(
-        "org.freedesktop.machine1",
-        "/org/freedesktop/machine1",
-        BUS_TIMEOUT,
-        &conn,
-    );
+    let conn = Connection::system().expect("Failed to connect to dbus");
+    let machined = machine_manager::ManagerProxyBlocking::new(&conn)
+        .expect("Failed to connect to machine manager");
 
     machined
         .terminate_machine(container_name)
