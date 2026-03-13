@@ -195,23 +195,14 @@ fn list() {
     }
 }
 
-fn systemd_proxy(conn: &Connection) -> zbus::Result<ManagerProxyBlocking<'_>> {
-    ManagerProxyBlocking::builder(conn)
-        .destination("org.freedesktop.systemd1")?
-        .path("/org/freedesktop/systemd1")?
-        .build()
-}
-
 fn get_container_path(container_name: &str, conn: &Connection) -> zbus::Result<OwnedObjectPath> {
-    let systemd = systemd_proxy(conn)?;
+    let systemd = ManagerProxyBlocking::new(conn)?;
     systemd.get_unit(&format!("container@{container_name}.service"))
 }
 
 fn status(container_name: &str) -> zbus::Result<()> {
     let conn = Connection::system().expect("Failed to connect to dbus");
     let unit = UnitProxyBlocking::builder(&conn)
-        .destination("org.freedesktop.systemd1")
-        .unwrap()
         .path(get_container_path(container_name, &conn)?)
         .unwrap()
         .build()
@@ -229,7 +220,7 @@ fn status(container_name: &str) -> zbus::Result<()> {
 fn start(container_name: &str) -> zbus::Result<()> {
     let conn = Connection::system().expect("Failed to connect to dbus");
 
-    let systemd = systemd_proxy(&conn)?;
+    let systemd = ManagerProxyBlocking::new(&conn)?;
 
     match systemd.start_unit(&format!("container@{container_name}.service"), "fail") {
         Ok(res) => {
@@ -252,7 +243,7 @@ fn start(container_name: &str) -> zbus::Result<()> {
 fn stop(container_name: &str) -> zbus::Result<()> {
     let conn = Connection::system().expect("Failed to connect to dbus");
 
-    let systemd = systemd_proxy(&conn)?;
+    let systemd = ManagerProxyBlocking::new(&conn)?;
 
     match systemd.stop_unit(&format!("container@{container_name}.service"), "fail") {
         Ok(res) => {
