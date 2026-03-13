@@ -151,10 +151,8 @@ fn main() -> zbus::Result<()> {
             use_host_network,
         } => todo!(),
         Commands::Destroy { container_name } => todo!(),
-        Commands::Restart { container_name } => {
-            restart(&container_name);
-            Ok(())
-        }
+        Commands::Restart { container_name } => restart(&container_name),
+
         Commands::Start { container_name } => start(&container_name),
         Commands::Stop { container_name } => stop(&container_name),
         Commands::Terminate { container_name } => {
@@ -256,15 +254,16 @@ fn stop(container_name: &str) -> zbus::Result<()> {
             dbg!(unit.active_state().unwrap());
         }
         Err(e) => {
+            dbg!(e);
             eprintln!("Failed to stop container unit {container_name}. Try running as root as interactive auth isn't implemented yet");
         }
     }
     Ok(())
 }
 
-fn restart(container_name: &str) {
-    stop(container_name);
-    start(container_name);
+fn restart(container_name: &str) -> zbus::Result<()> {
+    stop(container_name)?;
+    start(container_name)
 }
 
 // does an unclean immediate shutdown instead of a stop
