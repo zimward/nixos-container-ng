@@ -1,14 +1,12 @@
 use std::{
-    fs::File,
-    io::{stdout, Read, Write},
-    os::fd::{AsFd, AsRawFd, FromRawFd},
-    path::PathBuf,
+    fs::ReadDir,
+    os::fd::{AsRawFd, FromRawFd},
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
 use clap::{Args, Parser, Subcommand};
-use glob::glob;
 use zbus::{blocking::Connection, zvariant::OwnedObjectPath};
 
 use crate::{systemd_manager::ManagerProxyBlocking, unit::UnitProxyBlocking};
@@ -182,16 +180,36 @@ fn main() -> zbus::Result<()> {
 }
 
 fn list() {
-    let config_files = glob(&format!("{CONFIG_DIR}/*.conf")).expect("Faild to read config dir");
-    let config_files = config_files.filter_map(Result::ok).filter(|it| {
-        it != "/etc/containers/libpod.conf"
-            && it != "/etc/containers/containers.conf"
-            && it != "/etc/containers/registries.conf"
-    });
-    for f in config_files {
-        if let Some(f) = f.file_prefix() {
-            println!("{}", f.to_string_lossy());
+    let config_dir = Path::new(CONFIG_DIR);
+
+    let entries: ReadDir = match config_dir.read_dir() {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!(
+                "Failed to read config directory {}: {e}",
+                config_dir.display()
+            );
+            return;
         }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        if path.extension() != Some("conf".as_ref()) {
+            continue;
+        }
+
+        let name = match path.file_stem() {
+            Some(name) => name.to_string_lossy(),
+            None => continue,
+        };
+        // since we already ensured its a .conf file no need to check full name
+        if matches!(name.as_ref(), "libpod" | "containers" | "registries") {
+            continue;
+        }
+
+        println!("{name}");
     }
 }
 
