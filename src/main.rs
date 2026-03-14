@@ -1,14 +1,15 @@
 use std::{
-    path::{Path, PathBuf},
+    fs::File,
+    io::{stdout, Read, Write},
+    os::fd::{AsFd, AsRawFd, FromRawFd},
+    path::PathBuf,
+    process::Stdio,
     time::Duration,
 };
 
 use clap::{Args, Parser, Subcommand};
 use glob::glob;
-use zbus::{
-    blocking::{Connection, Proxy},
-    zvariant::OwnedObjectPath,
-};
+use zbus::{blocking::Connection, zvariant::OwnedObjectPath};
 
 use crate::{systemd_manager::ManagerProxyBlocking, unit::UnitProxyBlocking};
 
@@ -21,6 +22,10 @@ mod unit {
 
 mod machine_manager {
     include!(concat!(env!("OUT_DIR"), "/machine_manager.rs"));
+}
+
+mod job {
+    include!(concat!(env!("OUT_DIR"), "/job.rs"));
 }
 
 static BUS_TIMEOUT: Duration = Duration::from_secs(25);
@@ -155,10 +160,7 @@ fn main() -> zbus::Result<()> {
 
         Commands::Start { container_name } => start(&container_name),
         Commands::Stop { container_name } => stop(&container_name),
-        Commands::Terminate { container_name } => {
-            terminate(&container_name);
-            Ok(())
-        }
+        Commands::Terminate { container_name } => terminate(&container_name),
         Commands::Status { container_name } => status(&container_name),
         Commands::Update {
             container_name,
@@ -168,8 +170,8 @@ fn main() -> zbus::Result<()> {
             nixos_path,
             refresh,
         } => todo!(),
-        Commands::Login { container_name } => todo!(),
-        Commands::RootLogin { container_name } => todo!(),
+        Commands::Login { container_name } => login(&container_name),
+        Commands::RootLogin { container_name } => root_login(&container_name),
         Commands::Run {
             container_name,
             args,
@@ -219,20 +221,20 @@ fn start(container_name: &str) -> zbus::Result<()> {
     let conn = Connection::system().expect("Failed to connect to dbus");
 
     let systemd = ManagerProxyBlocking::new(&conn)?;
-
+    let jobrm = systemd.receive_job_removed()?;
+    // lets just assume the unit has started correctly if the job doesn't error
     match systemd.start_unit(&format!("container@{container_name}.service"), "fail") {
         Ok(res) => {
-            dbg!(&res);
-            let unit = UnitProxyBlocking::builder(&conn)
-                .path(res)
-                .unwrap()
-                .build()
-                .unwrap();
-            // TODO: check job state
-            dbg!(unit.active_state().unwrap());
+            for job in jobrm {
+                if job.args()?.job == *res {
+                    break;
+                }
+            }
+            //maybe check status of unit here and return non-zero exit code
         }
         Err(e) => {
-            eprintln!("Failed to start container unit {container_name}. Try running as root as interactive auth isn't implemented yet");
+            dbg!(e);
+            eprintln!("Failed to start container unit {container_name}.");
         }
     }
     Ok(())
@@ -242,20 +244,19 @@ fn stop(container_name: &str) -> zbus::Result<()> {
     let conn = Connection::system().expect("Failed to connect to dbus");
 
     let systemd = ManagerProxyBlocking::new(&conn)?;
+    let jobrm = systemd.receive_job_removed()?;
 
     match systemd.stop_unit(&format!("container@{container_name}.service"), "fail") {
         Ok(res) => {
-            dbg!(&res);
-            let unit = UnitProxyBlocking::builder(&conn)
-                .path(res)
-                .unwrap()
-                .build()
-                .unwrap();
-            dbg!(unit.active_state().unwrap());
+            for job in jobrm {
+                if job.args()?.job == *res {
+                    break;
+                }
+            }
         }
         Err(e) => {
             dbg!(e);
-            eprintln!("Failed to stop container unit {container_name}. Try running as root as interactive auth isn't implemented yet");
+            eprintln!("Failed to stop container unit {container_name}.");
         }
     }
     Ok(())
@@ -267,14 +268,33 @@ fn restart(container_name: &str) -> zbus::Result<()> {
 }
 
 // does an unclean immediate shutdown instead of a stop
-fn terminate(container_name: &str) {
+fn terminate(container_name: &str) -> zbus::Result<()> {
     let conn = Connection::system().expect("Failed to connect to dbus");
     let machined = machine_manager::ManagerProxyBlocking::new(&conn)
         .expect("Failed to connect to machine manager");
 
-    machined
-        .terminate_machine(container_name)
-        .expect("Failed to terminate machine. Try running as root as interactive auth isn't implemented yet");
+    machined.terminate_machine(container_name)
 }
 
-fn login(container_name: &str) {}
+fn login(container_name: &str) -> zbus::Result<()> {
+    let conn = Connection::system().expect("Failed to connect to dbus");
+    let machined = machine_manager::ManagerProxyBlocking::new(&conn)
+        .expect("Failed to connect to machine manager");
+
+    let pty = machined.open_machine_login(container_name)?;
+    Ok(())
+}
+
+fn root_login(container_name: &str) -> zbus::Result<()> {
+    let conn = Connection::system().expect("Failed to connect to dbus");
+    let machined = machine_manager::ManagerProxyBlocking::new(&conn)
+        .expect("Failed to connect to machine manager");
+    let pty = {
+        //make sure the object is not accessible once the rawfd has been extracted
+        let pty =
+            machined.open_machine_shell(container_name, "root", "/usr/bin/env", &["bash"], &[])?;
+        unsafe { Stdio::from_raw_fd(pty.0.as_raw_fd()) }
+    };
+    //connect the pty to the terminal and exit?
+    Ok(())
+}

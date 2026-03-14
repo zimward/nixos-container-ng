@@ -60,9 +60,25 @@ fn main() {
 
     let machine_manager_code = code_for_dbus_xml(
         systemd_dbus_interface_dir.join("org.freedesktop.machine1.Manager.xml"),
-        systemd_service,
-        systemd_path,
+        "org.freedesktop.machine1",
+        "/org/freedesktop/machine1",
+    );
+    let machine_manager_code = add_interactive_auth(
+        machine_manager_code,
+        &[
+            "terminate_machine",
+            "open_machine_login",
+            "open_machine_shell",
+        ],
     );
     let mut file = std::fs::File::create(out_path.join("machine_manager.rs")).unwrap();
     file.write_all(machine_manager_code.as_bytes()).unwrap();
+
+    let job_code = code_for_dbus_xml(
+        systemd_dbus_interface_dir.join("org.freedesktop.systemd1.Job.xml"),
+        systemd_service,
+        systemd_path,
+    );
+    let mut file = std::fs::File::create(out_path.join("job.rs")).unwrap();
+    file.write_all(job_code.as_bytes()).unwrap();
 }
